@@ -1,1 +1,1 @@
-TODO
+A computation over a population — every member a row — recorded as the DAG it is computed through, and drawn as one self-contained html page. The graph is never described: each op reads only the ids it is handed and records exactly those as its edges.
