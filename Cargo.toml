@@ -1,0 +1,17 @@
+cargo-features = ["codegen-backend"]
+
+[workspace]
+members = ["derivs", "derivs_view"]
+resolver = "3"
+
+[workspace.lints.clippy]
+float_cmp = "allow" # `==` on floats is what the bit-identity invariants assert
+
+[workspace.lints.rust]
+unused_features = "allow"
+
+[workspace.dependencies]
+derivs = { path = "derivs" }
+insta = "1.48.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] } # a tape read back is the tape written

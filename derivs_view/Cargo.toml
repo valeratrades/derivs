@@ -1,0 +1,21 @@
+cargo-features = ["codegen-backend"]
+
+[package]
+name = "derivs_view"
+version = "0.1.0"
+edition = "2024"
+authors = ["Valeriy Sakharov <valeratrades@gmail.com>"]
+description = "a recorded derivs tape, as one self-contained html page"
+license = "BlueOak-1.0.0"
+repository = "https://github.com/valeratrades/derivs"
+
+[[bin]]
+name = "derivs"
+path = "src/main.rs"
+
+[dependencies]
+derivs.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

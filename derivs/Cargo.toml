@@ -1,0 +1,19 @@
+cargo-features = ["codegen-backend"]
+
+[package]
+name = "derivs"
+version = "0.1.0"
+edition = "2024"
+authors = ["Valeriy Sakharov <valeratrades@gmail.com>"]
+description = "a computation over a population, recorded as the DAG it is computed through"
+license = "BlueOak-1.0.0"
+repository = "https://github.com/valeratrades/derivs"
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
