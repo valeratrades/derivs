@@ -8,11 +8,18 @@ use crate::{Id, Kind, Tape};
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Reading {
 	pub mean: Id,
-	/// The gate node, and its multiplier.
-	pub gate: Option<(Id, Id)>,
+	pub gate: Option<Id>,
 	pub terms: Vec<Term>,
-	/// Per row, the points the gate took off the mean.
-	pub gate_loss: Vec<f64>,
+	/// One per factor of the gate, in its order.
+	pub factors: Vec<Factor>,
+}
+
+/// One factor of a gate's product. A product does not split additively, so each factor is credited its Shapley value in `S ↦ mean·(1 − ∏_S f)`: the factors' losses sum to the gate's, and a factor of 1 takes nothing.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Factor {
+	pub of: Id,
+	/// Per row, the points it took off the mean.
+	pub loss: Vec<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -51,16 +58,10 @@ pub fn read(tape: &Tape) -> Vec<Reading> {
 			_ => None,
 		})
 		.map(|(mean, node, weights)| {
-			let gate = nodes
-				.iter()
-				.enumerate()
-				.find(|(_, n)| n.kind == Kind::Gate && n.deps[0] == mean)
-				.map(|(i, n)| (Id(i as u32), n.deps[1]));
-			let multiplier: Vec<f64> = match gate {
-				Some((_, by)) => tape.at(by).into_iter().map(|m| m.unwrap_or(1.0)).collect(),
-				None => vec![1.0; tape.rows.len()],
-			};
-			let out: Vec<f64> = tape.at(gate.map_or(mean, |(g, _)| g)).into_iter().map(|v| v.expect("a mean is on every row")).collect();
+			let gate = nodes.iter().position(|n| n.kind == Kind::Gate && n.deps[0] == mean).map(|i| Id(i as u32));
+			let by: &[Id] = gate.map_or(&[], |g| &tape.node(g).deps[1..]);
+			let multiplier = tape.multiplier(by);
+			let out: Vec<f64> = tape.at(gate.unwrap_or(mean)).into_iter().map(|v| v.expect("a mean is on every row")).collect();
 			let means: Vec<f64> = tape.at(mean).into_iter().map(|v| v.expect("a mean is on every row")).collect();
 			let total: f64 = weights.iter().sum();
 			let terms: Vec<Term> = node
@@ -98,31 +99,60 @@ pub fn read(tape: &Tape) -> Vec<Reading> {
 					}
 				})
 				.collect();
-			let gate_loss: Vec<f64> = means.iter().zip(&multiplier).map(|(v, m)| v * (1.0 - m)).collect();
+			let columns: Vec<Vec<f64>> = by.iter().map(|id| tape.at(*id).into_iter().map(|f| f.unwrap_or(1.0)).collect()).collect();
+			let losses: Vec<Vec<f64>> = (0..tape.rows.len()).map(|i| shapley(means[i], &columns.iter().map(|c| c[i]).collect::<Vec<_>>())).collect();
+			let factors: Vec<Factor> = by
+				.iter()
+				.enumerate()
+				.map(|(j, of)| Factor {
+					of: *of,
+					loss: losses.iter().map(|l| l[j]).collect(),
+				})
+				.collect();
 			for (i, row) in tape.rows.iter().enumerate() {
+				let gate_loss = means[i] * (1.0 - multiplier[i]);
 				let sum = |f: fn(&Fate) -> f64| terms.iter().map(|t| f(&t.fate[i])).sum::<f64>();
 				let close = |a: f64, b: f64, what: &str| assert!((a - b).abs() <= 1e-12, "`{}` at {row}: {what} sums to {a}, and is {b}", node.name);
 				close(sum(|f| f.contribution), out[i], "the contributions");
-				close(sum(|f| f.delivered) - gate_loss[i], out[i], "delivered less the gate's loss");
+				close(sum(|f| f.delivered) - gate_loss, out[i], "delivered less the gate's loss");
+				close(losses[i].iter().sum(), gate_loss, "the factors' losses");
 				close(sum(|f| f.delivered + f.shape_loss + f.absent), 1.0, "every fate");
 			}
-			Reading { mean, gate, terms, gate_loss }
+			Reading { mean, gate, terms, factors }
 		})
 		.collect()
 }
 
-/// Per node, its column: `max(1 + level(dep), level(gate))`, a gate's multiplier being drawn on the gated node's card rather than left of it.
+/// Per node, its column: one past its deepest dep.
 pub fn levels(tape: &Tape) -> Vec<usize> {
 	let mut levels: Vec<usize> = Vec::with_capacity(tape.nodes().len());
 	for node in tape.nodes() {
 		let at = |id: &Id| levels[id.0 as usize];
-		let level = match node.kind {
-			Kind::Gate => (at(&node.deps[0]) + 1).max(at(&node.deps[1])),
-			_ => node.deps.iter().map(|d| at(d) + 1).max().unwrap_or(0),
-		};
-		levels.push(level);
+		levels.push(node.deps.iter().map(|d| at(d) + 1).max().unwrap_or(0));
 	}
 	levels
+}
+
+/// Each factor's Shapley value in `S ↦ mean·(1 − ∏_S f)`. Its marginal to `S` is `mean·∏_S f·(1 − f_i)`, so it is `mean·(1 − f_i)·Σ_k e_k(the others) / (n·C(n−1, k))`, `e_k` the elementary symmetric polynomial.
+fn shapley(mean: f64, f: &[f64]) -> Vec<f64> {
+	let n = f.len();
+	(0..n)
+		.map(|i| {
+			let mut e = vec![0.0; n];
+			e[0] = 1.0;
+			for (seen, fj) in f.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, fj)| fj).enumerate() {
+				for k in (1..=seen + 1).rev() {
+					e[k] += e[k - 1] * fj;
+				}
+			}
+			let (mut choose, mut weighted) = (1.0, 0.0);
+			for (k, ek) in e.iter().enumerate() {
+				weighted += ek / (n as f64 * choose);
+				choose *= (n - 1 - k) as f64 / (k + 1) as f64;
+			}
+			mean * (1.0 - f[i]) * weighted
+		})
+		.collect()
 }
 
 fn mean_of(xs: &[f64]) -> f64 {
@@ -149,7 +179,7 @@ mod tests {
 		let one = tape.source("one", "human", None, Fidelity::Exact, vec![Some(Cell::At(1.0)); 3]);
 		let mean = tape.weighted_mean("mean", &[(x, 3.0), (one, 1.0)]);
 		let m = tape.source("m", "human", None, Fidelity::Exact, vec![Some(Cell::At(0.5)), None, None]);
-		tape.gate("score", mean, m);
+		tape.gate("score", mean, &[m]);
 		let readings = read(&tape);
 		(tape, readings)
 	}
@@ -163,7 +193,7 @@ mod tests {
 		assert_eq!((a.delivered, a.contribution), (0.75, 0.375));
 		assert_eq!(r.terms[0].fate[1].absent, 0.75);
 		assert_eq!(r.terms[0].fate[2].shape_loss, 0.375);
-		assert_eq!(r.gate_loss, [0.5, 0.0, 0.0]);
+		assert_eq!(r.factors[0].loss, [0.5, 0.0, 0.0]);
 	}
 
 	#[test]
@@ -173,15 +203,30 @@ mod tests {
 		assert_eq!(readings[0].terms[0].drives, Some(1.0));
 	}
 
-	/// The multiplier is two maps deep, the mean one: drawn on the gated card, it pulls that card to its own column rather than one past it.
+	/// Rows of a mean of 1, gated by `zero` × `half`: what each factor took is its Shapley value in the game `S ↦ mean·(1 − ∏_S f)`.
 	#[test]
-	fn a_gates_multiplier_docks_rather_than_pushing_right() {
+	fn a_gates_loss_splits_across_its_factors_by_shapley() {
+		let mut tape = Tape::new(vec!["both".into(), "halves".into(), "none".into()], String::new());
+		let one = tape.source("one", "human", None, Fidelity::Exact, vec![Some(Cell::At(1.0)); 3]);
+		let mean = tape.weighted_mean("mean", &[(one, 1.0)]);
+		let zero = tape.source("zero", "human", None, Fidelity::Exact, vec![Some(Cell::At(0.0)), Some(Cell::At(0.5)), None]);
+		let half = tape.source("half", "human", None, Fidelity::Exact, vec![Some(Cell::At(0.5)), Some(Cell::At(0.5)), None]);
+		tape.gate("score", mean, &[zero, half]);
+		let r = &read(&tape)[0];
+		assert_eq!(r.factors.iter().map(|f| f.of).collect::<Vec<_>>(), [zero, half]);
+		assert_eq!(r.factors[0].loss, [0.75, 0.375, 0.0]);
+		assert_eq!(r.factors[1].loss, [0.25, 0.375, 0.0]);
+	}
+
+	/// The gate's factors are cards of their own, so it sits one past the last of them.
+	#[test]
+	fn a_gate_sits_past_its_factors() {
 		let mut tape = Tape::new(vec!["a".into()], String::new());
 		let x = tape.source("x", "human", None, Fidelity::Exact, vec![Some(Cell::At(1.0))]);
 		let mean = tape.weighted_mean("mean", &[(x, 1.0)]);
 		let half = tape.map("half", x, &[], None, |_, _| 0.5);
 		let m = tape.map("m", half, &[], None, |_, _| 0.5);
-		tape.gate("score", mean, m);
-		assert_eq!(levels(&tape), [0, 1, 1, 2, 2]);
+		tape.gate("score", mean, &[m]);
+		assert_eq!(levels(&tape), [0, 1, 1, 2, 3]);
 	}
 }

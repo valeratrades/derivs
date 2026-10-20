@@ -39,10 +39,7 @@ const hue = new Map();
 for (const r of R) r.terms.forEach((t, i) => hue.set(t.of, `var(--s${(i % 8) + 1})`));
 const termOf = new Map();
 for (const r of R) for (const t of r.terms) termOf.set(t.of, { r, t });
-const docked = new Set(R.filter((r) => r.gate).map((r) => r.gate[1]));
-const dockedOn = new Map(R.filter((r) => r.gate).map((r) => [r.gate[1], r.gate[0]]));
-
-const out = R.length ? (R[0].gate ? R[0].gate[0] : R[0].mean) : null;
+const out = R.length ? (R[0].gate === null ? R[0].mean : R[0].gate) : null;
 const order = out === null ? ROWS.map((_, i) => i) : ROWS.map((_, i) => i).sort((a, b) => point(cells(N[out])[b]) - point(cells(N[out])[a]));
 const place = new Map(order.map((row, i) => [row, i]));
 let cursor = null;
@@ -101,12 +98,10 @@ function dag(root) {
 	// a mean's terms share the column left of it, so no term's edge runs through another's card
 	const col = (i) => (termOf.has(i) ? L[termOf.get(i).r.mean] - 1 : L[i]);
 	N.forEach((_, i) => {
-		if (docked.has(i)) return;
 		(cols[col(i)] = cols[col(i)] || []).push(i);
 	});
 	const at = new Map();
 	cols.forEach((col, c) => (col || []).forEach((i, r) => at.set(i, { x: 10 + c * (W + GAP_X), y: 30 + r * (H + GAP_Y) })));
-	for (const [m, g] of dockedOn) at.set(m, at.get(g));
 	const height = 40 + Math.max(...cols.map((c) => (c || []).length)) * (H + GAP_Y);
 	const svg = el("svg", { width: 20 + cols.length * (W + GAP_X), height }, root);
 	text(svg, 10, 16, cursor === null ? "edge width into a mean: what the term drives of its spread over the cohort" : `edge width into a mean: what the term contributes to ${ROWS[cursor]}`, { class: "muted" });
@@ -115,7 +110,6 @@ function dag(root) {
 	N.forEach((n, i) => {
 		n.deps.forEach((d) => {
 			const a = at.get(d), b = at.get(i);
-			if (a === b) return;
 			const term = kind(n) === "WeightedMean" ? termOf.get(d) : null;
 			let width = 1.2, color = null, dash = null;
 			if (term) {
@@ -138,7 +132,6 @@ function dag(root) {
 	});
 
 	N.forEach((n, i) => {
-		if (docked.has(i)) return;
 		const { x, y } = at.get(i);
 		const k = kind(n);
 		const rows = cells(n);
@@ -148,7 +141,7 @@ function dag(root) {
 		const term = termOf.get(i);
 		if (term) el("rect", { x: 0, y: 0, width: 4, height: H, rx: 2, fill: hue.get(i) }, g);
 		text(g, 10, 17, n.name, { class: "title" });
-		const what = k === "Source" ? `source · ${body(n).writer}` : k === "Reduce" ? "across rows → " + body(n).names.join(", ") : k === "WeightedMean" ? "weighted mean" : k === "Gate" ? "× " + N[n.deps[1]].name : k.toLowerCase();
+		const what = k === "Source" ? `source · ${body(n).writer}` : k === "Reduce" ? "across rows → " + body(n).names.join(", ") : k === "WeightedMean" ? "weighted mean" : k === "Gate" ? "× " + (n.deps.length === 2 ? N[n.deps[1]].name : `${n.deps.length - 1} factors`) : k.toLowerCase();
 		text(g, 10, 32, what, { class: "muted" });
 		let line;
 		if (rows === null) {
@@ -168,8 +161,14 @@ function dag(root) {
 			el("rect", { x: 10, y: 56, width: filled * span, height: 8, rx: 2, fill: hue.get(i) }, g);
 		}
 		if (k === "Gate") {
-			const m = cells(N[n.deps[1]]);
-			const badge = cursor === null ? `${m.filter((c) => c !== null).length} gated` : m[cursor] === null ? "not gated" : "× " + point(m[cursor]).toFixed(3);
+			const by = n.deps.slice(1).map((d) => cells(N[d]));
+			const m = ROWS.map((_, row) => by.reduce((p, c) => p * (c[row] === null ? 1 : point(c[row])), 1));
+			const badge =
+				cursor === null
+					? `${m.filter((v) => v === 0).length} zeroed · ${m.filter((v) => v > 0 && v < 1).length} reduced`
+					: by.every((c) => c[cursor] === null)
+						? "not gated"
+						: "× " + m[cursor].toFixed(3);
 			text(g, 10, 62, badge, { class: "muted" });
 		}
 		hover(g, () => {
@@ -186,12 +185,14 @@ const PW = 280, PH = 130, SH = 34, PAD = 34;
 function shapes(root) {
 	N.forEach((n, i) => {
 		if (kind(n) !== "Map" || body(n).curve === null) return;
-		const curve = body(n).curve;
+		const all = body(n).curve, domain = body(n).domain;
 		const x = N[n.deps[0]], u = unit(x);
-		const xs = curve.map((p) => p[0]), ys = curve.map((p) => p[1]);
-		const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
+		const [x0, x1] = domain || [all[0][0], all[all.length - 1][0]];
+		const curve = all.filter((p) => p[0] >= x0 && p[0] <= x1);
+		const ys = curve.map((p) => p[1]);
 		const [y0, y1] = [Math.min(0, ...ys), Math.max(1, ...ys)];
-		const sx = (v) => PAD + (x1 === x0 ? (PW - PAD - 8) / 2 : ((v - x0) / (x1 - x0)) * (PW - PAD - 8));
+		// values past the domain pile at its edge
+		const sx = (v) => PAD + (x1 === x0 ? (PW - PAD - 8) / 2 : ((Math.min(x1, Math.max(x0, v)) - x0) / (x1 - x0)) * (PW - PAD - 8));
 		const sy = (v) => 22 + (1 - (v - y0) / (y1 - y0)) * (PH - 40);
 		const panel = document.createElement("div");
 		panel.className = "panel";
@@ -220,12 +221,19 @@ function shapes(root) {
 
 		const rug = el("g", { opacity: 0.45 }, svg);
 		const base = top + SH + 4;
+		const past = [0, 0];
 		for (const c of cells(x)) {
 			if (!c) continue;
+			const vs = "At" in c ? [c.At] : "Within" in c ? c.Within : c.Each;
+			if (vs.every((v) => v < x0)) past[0]++;
+			if (vs.every((v) => v > x1)) past[1]++;
 			if ("At" in c) el("line", { x1: sx(c.At), x2: sx(c.At), y1: base, y2: base + 8, stroke: "var(--text-secondary)" }, rug);
 			else if ("Within" in c) el("line", { x1: sx(c.Within[0]), x2: sx(c.Within[1]), y1: base + 4, y2: base + 4, stroke: "var(--text-secondary)" }, rug);
 			else for (const t of c.Each) el("line", { x1: sx(t), x2: sx(t), y1: base, y2: base + 8, stroke: "var(--text-secondary)" }, rug);
 		}
+		const beyond = (n, side) => `${n} row${n === 1 ? "" : "s"} ${side} ${fmt(side === "below" ? x0 : x1, u)}, piled at the edge`;
+		if (past[0]) hover(text(svg, PAD, base - 2, `‹${past[0]}`, { fill: "var(--critical)" }), () => beyond(past[0], "below"));
+		if (past[1]) hover(text(svg, PW - 8, base - 2, `${past[1]}›`, { fill: "var(--critical)", "text-anchor": "end" }), () => beyond(past[1], "above"));
 		text(svg, PAD, base + 18, fmt(x0, u));
 		text(svg, PW - 8, base + 18, fmt(x1, u), { "text-anchor": "end" });
 		if (u) text(svg, (PAD + PW - 8) / 2, base + 30, u, { class: "muted", "text-anchor": "middle" });
@@ -233,10 +241,10 @@ function shapes(root) {
 		if (cursor !== null) {
 			const c = cells(x)[cursor], v = point(cells(n)[cursor]);
 			const dot = (cx, cy) => el("circle", { cx, cy, r: 4.5, fill: color, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
-			if (c && "At" in c) dot(sx(c.At), sy(v));
+			if (c && "At" in c) dot(sx(c.At), sy(v)).setAttribute("fill-opacity", c.At < x0 || c.At > x1 ? 0.3 : 1);
 			else if (c && "Within" in c) el("line", { x1: sx(c.Within[0]), x2: sx(c.Within[1]), y1: sy(v), y2: sy(v), stroke: color, "stroke-width": 4, "stroke-linecap": "round" }, svg);
 			else if (c && "Each" in c) {
-				const at = new Map(curve);
+				const at = new Map(all);
 				for (const t of c.Each) dot(sx(t), sy(at.get(t)));
 			}
 		}
@@ -255,15 +263,15 @@ function points(root) {
 	for (const r of R) {
 		const mean = N[r.mean];
 		const at = (t, f) => (cursor === null ? t.fate.reduce((s, x) => s + f(x), 0) / ROWS.length : f(t.fate[cursor]));
-		const gate = (t) => at(t, (x) => x.delivered - x.contribution);
+		const loss = (f) => (cursor === null ? f.loss.reduce((s, x) => s + x, 0) / ROWS.length : f.loss[cursor]);
 		const segs = [];
 		for (const t of r.terms) {
 			const c = hue.get(t.of), name = N[t.of].name;
 			segs.push({ v: at(t, (x) => x.contribution), fill: c, name, what: "delivered" });
-			segs.push({ v: gate(t), fill: "url(#gateloss)", name, what: "gate loss", edge: c });
 			segs.push({ v: at(t, (x) => x.shape_loss), fill: c, opacity: 0.25, name, what: "shape loss" });
 			segs.push({ v: at(t, (x) => x.absent), fill: "none", name, what: "absent", edge: c, dash: "3 2" });
 		}
+		for (const f of r.factors) segs.push({ v: loss(f), fill: "url(#gateloss)", name: N[f.of].name, what: "gate loss", edge: "var(--critical)" });
 		const total = segs.filter((s) => s.what === "delivered").reduce((s, x) => s + x.v, 0);
 		const BW = Math.max(700, Math.min(1400, window.innerWidth - 80)), BH = 34;
 		const panel = document.createElement("div");
@@ -271,7 +279,7 @@ function points(root) {
 		root.appendChild(panel);
 		const who = cursor === null ? "the cohort's mean row" : ROWS[cursor];
 		const p = document.createElement("div");
-		p.innerHTML = `<strong>${esc(mean.name)}${r.gate ? " × " + esc(N[r.gate[1]].name) : ""}</strong> <span class="secondary">— the 100 points of ${esc(who)}: ${pts(total)} delivered</span>`;
+		p.innerHTML = `<strong>${esc(mean.name)}${r.factors.map((f) => " × " + esc(N[f.of].name)).join("")}</strong> <span class="secondary">— the 100 points of ${esc(who)}: ${pts(total)} delivered</span>`;
 		panel.appendChild(p);
 		const svg = el("svg", { width: BW + 2, height: BH + 26 }, panel);
 		const defs = el("defs", {}, svg);
@@ -291,13 +299,14 @@ function points(root) {
 			if (s.dash) r2.setAttribute("stroke-dasharray", s.dash);
 			hover(r2, () => `${s.name} · ${s.what}\n${pts(s.v)} pts`);
 			if (w > 34 && s.what === "delivered") text(svg, x + w / 2, BH + 16, pts(s.v), { "text-anchor": "middle" });
+			if (w > 60 && s.what === "gate loss") text(svg, x + w / 2, BH + 16, `${s.name} ${pts(s.v)}`, { "text-anchor": "middle", fill: "var(--critical)" });
 			x += w;
 		}
 		const legend = document.createElement("div");
 		legend.className = "legend";
 		legend.innerHTML =
 			r.terms.map((t) => `<span><span class="swatch" style="background:${hue.get(t.of)}"></span>${esc(N[t.of].name)}</span>`).join("") +
-			`<span class="muted">solid = delivered · hatched red = gate loss · pale = shape loss · dashed outline = absent</span>`;
+			`<span class="muted">solid = delivered · pale = shape loss · dashed outline = absent · hatched red = gate loss, per factor (its Shapley share of the product's)</span>`;
 		panel.appendChild(legend);
 
 		const rows = r.terms
@@ -308,9 +317,15 @@ function points(root) {
 			})
 			.join("");
 		const head = `<tr><th>term</th><th>allocated</th><th>delivered</th><th>drives</th><th>set</th>${cursor === null ? "" : "<th>v</th><th>contribution</th><th>headroom</th>"}</tr>`;
-		const gateRow = r.gate ? `<tr><td class="muted">gate loss</td><td></td><td class="num">${pts(r.gate_loss.reduce((s, x) => s + x, 0) / ROWS.length)}</td><td></td><td></td>${cursor === null ? "" : `<td class="num">${fmt(point(cells(N[r.gate[1]])[cursor]))}</td><td class="num">−${pts(r.gate_loss[cursor])}</td><td></td>`}</tr>` : "";
+		const gateRows = r.factors
+			.map((f) => {
+				const c = cells(N[f.of]);
+				const here = cursor === null ? "" : `<td class="num">${fmt(point(c[cursor]))}</td><td class="num">−${pts(f.loss[cursor])}</td><td></td>`;
+				return `<tr><td class="muted">gate loss · ${esc(N[f.of].name)}</td><td></td><td class="num">−${pts(loss(f))}</td><td></td><td class="num">${c.filter((v) => v !== null).length}</td>${here}</tr>`;
+			})
+			.join("");
 		const table = document.createElement("table");
-		table.innerHTML = head + rows + gateRow;
+		table.innerHTML = head + rows + gateRows;
 		panel.appendChild(table);
 	}
 }

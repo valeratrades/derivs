@@ -22,11 +22,13 @@ caller ──► Tape::{source, reduce, map, cohort, weighted_mean, gate} ──
 
 ```
 Source ──► Reduce ──► Map ──► WeightedMean ──► Gate
-   │      (cohort →   (per row,  (Σw·v/Σw)     (× a multiplier,
-   │       scalars:    v = f(x,                 docked on the card
-   │       the edges   scalars),                it gates)
+   │      (cohort →   (per row,  (Σw·v/Σw)     (× ∏ factors,
+   │       scalars:    v = f(x,                 an absent
+   │       the edges   scalars),                factor 1)
    │       across      curve = f
-   │       rows)       sampled)
+   │       rows)       sampled
+   │                   over its
+   │                   domain)
    └──────────────────────────────► Cohort (per row, off the whole cohort's columns)
 ```
 
@@ -41,10 +43,15 @@ For every `WeightedMean`, and the `Gate` over it if any:
 | drives | term | `cov(w·v/Σw, mean)/var(mean)` |
 | fate | term × row | `delivered + shape loss + absent = w/Σw` |
 | contribution | term × row | `m·w·v/Σw`, the exact Shapley value against the all-absent row |
-| gate loss | row | `mean·(1 − m)` |
+| gate loss | factor × row | its Shapley value in `S ↦ mean·(1 − ∏_S f)`; Σ over factors = `mean·(1 − m)` |
 
-Layout: `level = max(1 + level(dep), level(gate))`, as exec_viz's `dag.rs` — a gate's multiplier is drawn on
-the card it gates, so it pulls that card to its own column rather than one past it.
+`m` is the product of the gate's factors. A product does not split additively; Shapley is the one split that
+closes, credits a factor of 1 nothing, and treats factors alike — the same attribution `contribution` already is.
+
+Layout: `level = 1 + max level(dep)`.
+
+A `Map`'s shape is drawn over its declared domain; values past it pile at the edge, counted, rather than
+stretching the axis.
 
 ## Invariants
 
@@ -54,7 +61,8 @@ the card it gates, so it pulls that card to its own column rather than one past 
   values, at every value the cohort holds besides a uniform grid — every row's point is on its curve exactly.
 - **Recording is noninvasive**: a computation through the tape yields bit-identical outputs to the computation
   without it (as `r[observe.noninvasive]` in trading_data).
-- **Contributions close**: per row, Σ contributions == the gated value, and delivered − gate loss == the same.
+- **Contributions close**: per row, Σ contributions == the gated value, delivered − gate loss == the same, and
+  Σ factor losses == the gate loss.
   Asserted on every `read`, to 1e-12, never rounded away.
 - **A tape is self-sufficient**: the view reads nothing but the tape; `derivs view` of a saved tape reproduces
   the page byte for byte.

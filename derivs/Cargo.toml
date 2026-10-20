@@ -2,7 +2,7 @@ cargo-features = ["codegen-backend"]
 
 [package]
 name = "derivs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Valeriy Sakharov <valeratrades@gmail.com>"]
 description = "a computation over a population, recorded as the DAG it is computed through"

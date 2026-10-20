@@ -3,7 +3,7 @@
 
 mod read;
 
-pub use read::{Fate, Reading, Term, levels, read};
+pub use read::{Factor, Fate, Reading, Term, levels, read};
 use serde::{Deserialize, Serialize};
 
 /// Uniform samples a `Map`'s curve takes over its domain, besides every value the cohort holds.
@@ -71,8 +71,11 @@ impl Tape {
 		self.push(name, kind, deps, Vals::Scalars(scalars.map(Vec::from)), None)
 	}
 
-	/// `domain` is where the curve is drawn besides wherever the cohort's values are.
+	/// `domain` is the x the curve is drawn over, `None` taking the cohort's extent.
 	pub fn map(&mut self, name: &str, x: Id, scalars: &[Id], domain: Option<[f64; 2]>, f: impl Fn(&Cell, &[f64]) -> f64) -> Id {
+		if let Some([lo, hi]) = domain {
+			assert!(lo.is_finite() && hi.is_finite() && lo < hi, "`{name}`: a domain is a span, and is [{lo}, {hi}]");
+		}
 		let mut deps = vec![x];
 		let mut given = Some(Vec::new());
 		for id in scalars {
@@ -88,7 +91,7 @@ impl Tape {
 		let xs = self.rows(x);
 		let Some(given) = given else {
 			assert!(xs.iter().all(Option::is_none), "`{name}`: a reduction over the cohort came out empty while a row holds a value");
-			return self.push(name, Kind::Map { curve: None }, &deps, Vals::Rows(vec![None; xs.len()]), None);
+			return self.push(name, Kind::Map { curve: None, domain }, &deps, Vals::Rows(vec![None; xs.len()]), None);
 		};
 		let eval = |cell: &Cell| {
 			let v = f(cell, &given);
@@ -104,16 +107,15 @@ impl Tape {
 				Cell::Within(lo, hi) => vec![*lo, *hi],
 				Cell::Each(items) => items.clone(),
 			})
-			.chain(domain.into_iter().flatten())
 			.collect();
-		let curve = (!points.is_empty()).then(|| {
-			let (lo, hi) = points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+		let span = domain.or_else(|| (!points.is_empty()).then(|| points.iter().fold([f64::INFINITY, f64::NEG_INFINITY], |[lo, hi], v| [lo.min(*v), hi.max(*v)])));
+		let curve = span.map(|[lo, hi]| {
 			points.extend((0..=SAMPLES).map(|i| lo + (hi - lo) * i as f64 / SAMPLES as f64));
 			points.sort_by(f64::total_cmp);
 			points.dedup();
 			points.into_iter().map(|t| [t, eval(&Cell::At(t))]).collect()
 		});
-		self.push(name, Kind::Map { curve }, &deps, Vals::Rows(vals), None)
+		self.push(name, Kind::Map { curve, domain }, &deps, Vals::Rows(vals), None)
 	}
 
 	pub fn cohort(&mut self, name: &str, deps: &[Id], f: impl FnOnce(&[&[Option<Cell>]]) -> Vec<Option<f64>>) -> Id {
@@ -137,14 +139,24 @@ impl Tape {
 		self.push(name, kind, &deps, Vals::Rows(vals), None)
 	}
 
-	pub fn gate(&mut self, name: &str, of: Id, by: Id) -> Id {
-		let (of_vals, by_vals) = (self.at(of), self.at(by));
-		let vals = of_vals
+	/// `of` × the product of `by`, an absent factor being none.
+	pub fn gate(&mut self, name: &str, of: Id, by: &[Id]) -> Id {
+		assert!(!by.is_empty(), "`{name}`: a gate is gated by something");
+		let multiplier = self.multiplier(by);
+		let vals = self
+			.at(of)
 			.iter()
-			.zip(&by_vals)
-			.map(|(v, m)| Some(Cell::At(v.expect("a gated node holds a value on every row") * m.unwrap_or(1.0))))
+			.zip(multiplier)
+			.map(|(v, m)| Some(Cell::At(v.expect("a gated node holds a value on every row") * m)))
 			.collect();
-		self.push(name, Kind::Gate, &[of, by], Vals::Rows(vals), None)
+		let deps: Vec<Id> = std::iter::once(of).chain(by.iter().copied()).collect();
+		self.push(name, Kind::Gate, &deps, Vals::Rows(vals), None)
+	}
+
+	/// Per row, the product of `factors`, an absent one being 1.
+	fn multiplier(&self, factors: &[Id]) -> Vec<f64> {
+		let columns: Vec<Vec<Option<f64>>> = factors.iter().map(|id| self.at(*id)).collect();
+		(0..self.rows.len()).map(|i| columns.iter().map(|c| c[i].unwrap_or(1.0)).product()).collect()
 	}
 
 	fn rows(&self, id: Id) -> &[Option<Cell>] {
@@ -194,13 +206,13 @@ pub enum Kind {
 	Source { writer: String, unit: Option<String> },
 	/// The whole cohort into named scalars: the edges that run across rows.
 	Reduce { names: Vec<String> },
-	/// Per row, `v = f(x, scalars)` of its first dep, the others being `Reduce`s. `curve` is `f` sampled over the domain, `None` when the cohort holds no value to put one under.
-	Map { curve: Option<Vec<[f64; 2]>> },
+	/// Per row, `v = f(x, scalars)` of its first dep, the others being `Reduce`s. `curve` is `f` sampled over `domain` and at every value the cohort holds, `None` when there is neither to put one under.
+	Map { curve: Option<Vec<[f64; 2]>>, domain: Option<[f64; 2]> },
 	/// Per row, out of the whole cohort's columns.
 	Cohort,
 	/// `Σ w·v / Σ w`, an absent `v` crediting 0.
 	WeightedMean { weights: Vec<f64> },
-	/// Its first dep × its second, an absent multiplier being none. Drawn docked on its consumer.
+	/// Its first dep × the product of the rest, an absent factor being none.
 	Gate,
 }
 
@@ -251,7 +263,7 @@ mod tests {
 		});
 		let mean = tape.weighted_mean("mean", &[(v, 3.0), (y, 1.0)]);
 		let m = tape.source("m", "human", None, Fidelity::Exact, vec![None, Some(Cell::At(0.5)), Some(Cell::At(0.25))]);
-		let score = tape.gate("score", mean, m);
+		let score = tape.gate("score", mean, &[m]);
 		(tape, [x, max, v, mean, m, score])
 	}
 
@@ -266,12 +278,24 @@ mod tests {
 	#[test]
 	fn a_maps_curve_passes_through_every_rows_value() {
 		let (tape, [x, _, v, ..]) = tape();
-		let Kind::Map { curve: Some(curve) } = &tape.node(v).kind else { panic!("v has a curve") };
+		let Kind::Map { curve: Some(curve), .. } = &tape.node(v).kind else { panic!("v has a curve") };
 		for (x, v) in tape.at(x).iter().zip(tape.at(v)) {
 			if let (Some(x), Some(v)) = (x, v) {
 				assert!(curve.contains(&[*x, v]), "({x}, {v}) is off the curve");
 			}
 		}
+	}
+
+	/// A value far past the domain is still on the curve, and does not thin the grid the domain is drawn from.
+	#[test]
+	fn a_maps_grid_spans_its_domain_rather_than_its_values() {
+		let (tape, [.., v, _, _, _]) = tape();
+		let Kind::Map { curve: Some(curve), domain } = &tape.node(v).kind else {
+			panic!("v has a curve")
+		};
+		assert_eq!(*domain, Some([0.0, 1.0]));
+		assert_eq!(curve.iter().filter(|p| p[0] <= 1.0).count(), SAMPLES + 1);
+		assert!(curve.iter().any(|p| p[0] == 3.0), "the row past the domain is on the curve");
 	}
 
 	#[test]

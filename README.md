@@ -13,8 +13,8 @@ A computation over a population — every member a row — recorded as the DAG i
 </summary>
 
 ```toml
-derivs = { git = "https://github.com/valeratrades/derivs", tag = "v0.1.0" }
-derivs_view = { git = "https://github.com/valeratrades/derivs", tag = "v0.1.0" }
+derivs = { git = "https://github.com/valeratrades/derivs", tag = "v0.2.0" }
+derivs_view = { git = "https://github.com/valeratrades/derivs", tag = "v0.2.0" }
 ```
 
 </details>
