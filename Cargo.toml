@@ -10,6 +10,9 @@ float_cmp = "allow" # `==` on floats is what the bit-identity invariants assert
 [workspace.lints.rust]
 unused_features = "allow"
 
+[workspace.lints.cargo]
+non_kebab_case_bins = "allow"
+
 [workspace.dependencies]
 derivs = { path = "derivs" }
 insta = "1.48.0"
