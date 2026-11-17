@@ -6,8 +6,11 @@ resolver = "3"
 
 [workspace.lints.clippy]
 float_cmp = "allow" # `==` on floats is what the bit-identity invariants assert
+if_not_else = "warn"
+integer_division = "warn"
 
 [workspace.lints.rust]
+stable_features = "allow"
 unused_features = "allow"
 
 [workspace.lints.cargo]
@@ -18,3 +21,6 @@ derivs = { path = "derivs" }
 insta = "1.48.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] } # a tape read back is the tape written
+
+[workspace.package]
+repository = "https://github.com/valeratrades/derivs"
